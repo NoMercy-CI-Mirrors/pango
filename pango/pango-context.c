@@ -66,10 +66,12 @@ pango_context_init (PangoContext *context)
   context->gravity_hint = PANGO_GRAVITY_HINT_NATURAL;
 
   context->serial = 1;
+  context->layout_serial = 1;
   context->set_language = NULL;
   context->language = pango_language_get_default ();
   context->font_map = NULL;
   context->round_glyph_positions = TRUE;
+  context->skip_ink = PANGO_SKIP_INK_NONE;
 
   context->font_desc = pango_font_description_new ();
   pango_font_description_set_family_static (context->font_desc, "serif");
@@ -741,6 +743,7 @@ context_changed (PangoContext *context)
   if (context->serial == 0)
     context->serial++;
 
+  context->layout_serial = context->serial;
   g_clear_pointer (&context->metrics, pango_font_metrics_unref);
 }
 
@@ -847,4 +850,58 @@ gboolean
 pango_context_get_round_glyph_positions (PangoContext *context)
 {
   return context->round_glyph_positions;
+}
+
+/**
+ * pango_context_set_skip_ink:
+ * @context: a `PangoContext`
+ * @skip_ink: the ink-skipping policy
+ *
+ * Sets whether underlines and overlines leave gaps around glyph outlines.
+ *
+ * With %PANGO_SKIP_INK_AUTO, ink skipping is disabled for CJK script runs.
+ * With %PANGO_SKIP_INK_ALL, glyph ink is skipped regardless of the script.
+ * Strikethroughs and error underlines are unaffected.
+ *
+ * Vertical text, custom shapes, and color or missing glyphs do not interrupt
+ * decorations. Glyphs without available outlines do not produce gaps.
+ *
+ * The default is %PANGO_SKIP_INK_NONE. This setting affects layouts rendered
+ * with [method@Pango.Renderer.draw_layout] or
+ * [method@Pango.Renderer.draw_layout_line], including PangoCairo rendering.
+ *
+ * Since: 1.60
+ */
+void
+pango_context_set_skip_ink (PangoContext *context,
+                            PangoSkipInk  skip_ink)
+{
+  g_return_if_fail (PANGO_IS_CONTEXT (context));
+  g_return_if_fail (skip_ink >= PANGO_SKIP_INK_NONE && skip_ink <= PANGO_SKIP_INK_ALL);
+
+  if (context->skip_ink != skip_ink)
+    {
+      context->skip_ink = skip_ink;
+      context->serial++;
+      if (context->serial == 0)
+        context->serial++;
+    }
+}
+
+/**
+ * pango_context_get_skip_ink:
+ * @context: a `PangoContext`
+ *
+ * Gets the ink-skipping policy for underlines and overlines.
+ *
+ * Returns: the ink-skipping policy
+ *
+ * Since: 1.60
+ */
+PangoSkipInk
+pango_context_get_skip_ink (PangoContext *context)
+{
+  g_return_val_if_fail (PANGO_IS_CONTEXT (context), PANGO_SKIP_INK_NONE);
+
+  return context->skip_ink;
 }

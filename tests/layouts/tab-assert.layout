@@ -5,6 +5,7 @@
     "gravity-hint" : "natural",
     "base-dir" : "weak-ltr",
     "round-glyph-positions" : true,
+    "skip-ink" : "none",
     "transform" : [
       1,
       0,

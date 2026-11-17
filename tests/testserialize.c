@@ -530,11 +530,57 @@ generate_font_map (void)
   return map;
 }
 
+static void
+test_serialize_skip_ink (void)
+{
+  const char legacy[] = "{\"context\": {}, \"text\": \"legacy\"}";
+  const char invalid[] = "{\"context\": {\"skip-ink\": \"invalid\"}, \"text\": \"test\"}";
+  PangoContext *source = pango_font_map_create_context (pango_cairo_font_map_get_default ());
+  PangoContext *target = pango_font_map_create_context (pango_cairo_font_map_get_default ());
+  PangoLayout *layout = pango_layout_new (source);
+  PangoLayout *copy;
+  GBytes *bytes;
+  GError *error = NULL;
+
+  pango_layout_set_text (layout, "AgypA", -1);
+
+  for (PangoSkipInk mode = PANGO_SKIP_INK_NONE; mode <= PANGO_SKIP_INK_ALL; mode++)
+    {
+      pango_context_set_skip_ink (source, mode);
+      pango_context_set_skip_ink (target, mode == PANGO_SKIP_INK_NONE ? PANGO_SKIP_INK_ALL : PANGO_SKIP_INK_NONE);
+      bytes = pango_layout_serialize (layout, PANGO_LAYOUT_SERIALIZE_CONTEXT);
+      copy = pango_layout_deserialize (target, bytes, PANGO_LAYOUT_DESERIALIZE_CONTEXT, &error);
+      g_assert_no_error (error);
+      g_assert_nonnull (copy);
+      g_assert_cmpint (pango_context_get_skip_ink (target), ==, mode);
+      g_object_unref (copy);
+      g_bytes_unref (bytes);
+    }
+
+  pango_context_set_skip_ink (target, PANGO_SKIP_INK_NONE);
+  bytes = g_bytes_new_static (legacy, sizeof legacy - 1);
+  copy = pango_layout_deserialize (target, bytes, PANGO_LAYOUT_DESERIALIZE_CONTEXT, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (copy);
+  g_assert_cmpint (pango_context_get_skip_ink (target), ==, PANGO_SKIP_INK_NONE);
+  g_object_unref (copy);
+  g_bytes_unref (bytes);
+  bytes = g_bytes_new_static (invalid, sizeof invalid - 1);
+  copy = pango_layout_deserialize (target, bytes, PANGO_LAYOUT_DESERIALIZE_CONTEXT, &error);
+  g_assert_error (error, PANGO_LAYOUT_DESERIALIZE_ERROR, PANGO_LAYOUT_DESERIALIZE_INVALID_VALUE);
+  g_assert_null (copy);
+  g_clear_error (&error);
+  g_bytes_unref (bytes);
+
+  g_object_unref (layout);
+  g_object_unref (source);
+  g_object_unref (target);
+}
+
 int
 main (int argc, char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
-
   g_test_add_func ("/serialize/attr-list", test_serialize_attr_list);
   g_test_add_func ("/serialize/tab-array", test_serialize_tab_array);
   g_test_add_func ("/serialize/font", test_serialize_font);
@@ -543,6 +589,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/serialize/layout/context", test_serialize_layout_context);
   g_test_add_func ("/serialize/layout/invalid", test_serialize_layout_invalid);
   g_test_add_func ("/serialize/layout/shape-flags", test_serialize_shape_flags);
+  g_test_add_func ("/serialize/skip-ink", test_serialize_skip_ink);
 
   return g_test_run ();
 }

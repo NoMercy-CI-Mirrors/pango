@@ -21,6 +21,7 @@ test_env.set('FONTCONFIG_FILE', '/etc/fonts/fonts.conf')
 
 tests = [
   [ 'test-coverage' ],
+  [ 'test-skip-ink' ],
   [ 'testboundaries' ],
   [ 'testboundaries_ucd' ],
   [ 'testcolor' ],

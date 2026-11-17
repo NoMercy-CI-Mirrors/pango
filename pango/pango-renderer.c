@@ -21,8 +21,10 @@
 
 #include "config.h"
 #include <stdlib.h>
+#include <math.h>
 
 #include "pango-renderer.h"
+#include "pango-ink-private.h"
 #include "pango-impl-utils.h"
 #include "pango-layout-private.h"
 
@@ -52,6 +54,10 @@ struct _LineState
   PangoRectangle overline_rect;
 
   int logical_rect_end;
+  int x, y;
+  PangoSkipInk skip_ink;
+  GArray *ink_glyphs;
+  GArray *ink_strips;
 };
 
 struct _PangoRendererPrivate
@@ -65,6 +71,7 @@ struct _PangoRendererPrivate
   PangoOverline overline;
 
   PangoRenderComponent components;
+  GHashTable *ink_cache;
 };
 
 static void pango_renderer_finalize                     (GObject          *gobject);
@@ -144,6 +151,7 @@ pango_renderer_finalize (GObject *gobject)
 {
   PangoRenderer *renderer = PANGO_RENDERER (gobject);
 
+  g_clear_pointer (&renderer->priv->ink_cache, g_hash_table_unref);
   pango_matrix_free (renderer->matrix);
 
   G_OBJECT_CLASS (pango_renderer_parent_class)->finalize (gobject);
@@ -213,6 +221,288 @@ pango_renderer_draw_layout (PangoRenderer *renderer,
   pango_renderer_deactivate (renderer);
 }
 
+typedef struct
+{
+  PangoFont *font;
+  PangoGlyph glyph;
+  double x, y;
+} InkGlyph;
+
+typedef struct
+{
+  double left, right;
+} InkGap;
+
+typedef struct
+{
+  int y, height;
+  GArray *gaps;
+} InkStrip;
+
+static gboolean should_draw_part (PangoRenderer   *renderer,
+                                  PangoRenderPart  part);
+
+static void get_item_properties (PangoItem       *item,
+                                 PangoAttrShape **shape_attr);
+
+static int
+get_run_y_offset (PangoLayoutRun *run,
+                  PangoRectangle *logical)
+{
+  int y_off = run->y_offset;
+
+  if (run->item->analysis.flags & PANGO_ANALYSIS_FLAG_CENTERED_BASELINE)
+    {
+      gboolean is_hinted = ((logical->y | logical->height) & (PANGO_SCALE - 1)) == 0;
+      int adjustment = logical->y + logical->height / 2;
+
+      if (is_hinted)
+        adjustment = PANGO_UNITS_ROUND (adjustment);
+
+      y_off += adjustment;
+    }
+
+  return y_off;
+}
+
+static GArray *
+collect_ink_glyphs (PangoRenderer *renderer,
+                    LineState     *state)
+{
+  GArray *glyphs = g_array_new (FALSE, FALSE, sizeof (InkGlyph));
+  double x = state->x;
+  GSList *l;
+
+  for (l = renderer->priv->line->runs; l; l = l->next)
+    {
+      PangoLayoutRun *run = l->data;
+      PangoAttrShape *shape_attr;
+      PangoRectangle logical;
+      double y;
+      int width;
+      gboolean skip;
+
+      get_item_properties (run->item, &shape_attr);
+
+      if (shape_attr)
+        {
+          _pango_shape_get_extents (run->glyphs->num_glyphs,
+                                    &shape_attr->ink_rect,
+                                    &shape_attr->logical_rect,
+                                    NULL, &logical);
+          width = logical.width;
+        }
+      else if (run->item->analysis.flags & PANGO_ANALYSIS_FLAG_CENTERED_BASELINE)
+        {
+          pango_glyph_string_extents (run->glyphs, run->item->analysis.font,
+                                      NULL, &logical);
+          width = logical.width;
+        }
+      else
+        width = pango_glyph_string_get_width (run->glyphs);
+
+      x += run->start_x_offset;
+      y = state->y - get_run_y_offset (run, &logical);
+      skip = shape_attr != NULL || run->item->analysis.font == NULL ||
+             PANGO_GRAVITY_IS_VERTICAL (run->item->analysis.gravity) ||
+             (state->skip_ink == PANGO_SKIP_INK_AUTO &&
+              (run->item->analysis.script == PANGO_SCRIPT_HAN ||
+               run->item->analysis.script == PANGO_SCRIPT_HANGUL ||
+               run->item->analysis.script == PANGO_SCRIPT_HIRAGANA ||
+               run->item->analysis.script == PANGO_SCRIPT_KATAKANA ||
+               run->item->analysis.script == PANGO_SCRIPT_BOPOMOFO));
+
+      if (!skip)
+        {
+          double glyph_x = x;
+          guint n_glyphs = glyphs->len;
+
+          g_array_set_size (glyphs, n_glyphs + run->glyphs->num_glyphs);
+
+          for (int i = 0; i < run->glyphs->num_glyphs; i++)
+            {
+              PangoGlyphInfo *info = &run->glyphs->glyphs[i];
+              InkGlyph glyph = { run->item->analysis.font, info->glyph,
+                                 glyph_x + info->geometry.x_offset,
+                                 y + info->geometry.y_offset };
+
+              if (!info->attr.is_color)
+                g_array_index (glyphs, InkGlyph, n_glyphs++) = glyph;
+
+              glyph_x += info->geometry.width;
+            }
+
+          g_array_set_size (glyphs, n_glyphs);
+        }
+
+      x += width + run->end_x_offset;
+    }
+
+  return glyphs;
+}
+
+static int
+compare_ink_gaps (gconstpointer a,
+                  gconstpointer b)
+{
+  const InkGap *ga = a;
+  const InkGap *gb = b;
+
+  return (ga->left > gb->left) - (ga->left < gb->left);
+}
+
+static void
+ink_strip_clear (gpointer data)
+{
+  InkStrip *strip = data;
+
+  g_clear_pointer (&strip->gaps, g_array_unref);
+}
+
+static GArray *
+get_ink_gaps (PangoRenderer *renderer,
+              LineState     *state,
+              int            y,
+              int            height)
+{
+  InkStrip strip = { y, height, NULL };
+  double padding = MAX (height, PANGO_SCALE / 2);
+  gboolean needs_sort = FALSE;
+
+  if (!state->ink_strips)
+    {
+      state->ink_strips = g_array_new (FALSE, FALSE, sizeof (InkStrip));
+      g_array_set_clear_func (state->ink_strips, ink_strip_clear);
+    }
+
+  for (guint i = 0; i < state->ink_strips->len; i++)
+    {
+      InkStrip *cached = &g_array_index (state->ink_strips, InkStrip, i);
+
+      if (cached->y == y && cached->height == height)
+        return cached->gaps;
+    }
+
+  if (!state->ink_glyphs)
+    state->ink_glyphs = collect_ink_glyphs (renderer, state);
+
+  if (!renderer->priv->ink_cache)
+    renderer->priv->ink_cache = _pango_ink_cache_new ();
+
+  strip.gaps = g_array_new (FALSE, FALSE, sizeof (InkGap));
+
+  for (guint i = 0; i < state->ink_glyphs->len; i++)
+    {
+      InkGlyph *glyph = &g_array_index (state->ink_glyphs, InkGlyph, i);
+      InkGap gap;
+      InkGap *previous;
+
+      if (!_pango_ink_get_interval (renderer->priv->ink_cache, glyph->font, glyph->glyph,
+                                    y - glyph->y, (double) y + height - glyph->y,
+                                    &gap.left, &gap.right))
+        continue;
+
+      gap.left = floor (glyph->x + gap.left - padding);
+      gap.right = ceil (glyph->x + gap.right + padding);
+
+      previous = strip.gaps->len ? &g_array_index (strip.gaps, InkGap, strip.gaps->len - 1) : NULL;
+
+      if (previous)
+        {
+          if (gap.left < previous->left)
+            needs_sort = TRUE;
+          else if (gap.left <= previous->right)
+            {
+              previous->right = MAX (previous->right, gap.right);
+              continue;
+            }
+        }
+
+      g_array_append_val (strip.gaps, gap);
+    }
+
+  if (needs_sort)
+    {
+      guint n_gaps = 0;
+
+      g_array_sort (strip.gaps, compare_ink_gaps);
+
+      for (guint i = 0; i < strip.gaps->len; i++)
+        {
+          InkGap gap = g_array_index (strip.gaps, InkGap, i);
+          InkGap *previous = n_gaps ? &g_array_index (strip.gaps, InkGap, n_gaps - 1) : NULL;
+
+          if (previous && gap.left <= previous->right)
+            previous->right = MAX (previous->right, gap.right);
+          else
+            g_array_index (strip.gaps, InkGap, n_gaps++) = gap;
+        }
+
+      g_array_set_size (strip.gaps, n_gaps);
+    }
+
+  g_array_append_val (state->ink_strips, strip);
+
+  return strip.gaps;
+}
+
+static void
+draw_decoration (PangoRenderer  *renderer,
+                 PangoRenderPart part,
+                 int             x,
+                 int             y,
+                 int             width,
+                 int             height)
+{
+  LineState *state = renderer->priv->line_state;
+  GArray *gaps;
+  double end = (double) x + width;
+  double cursor = x;
+  guint lo, hi;
+
+  if (!should_draw_part (renderer, part))
+    return;
+
+  if (!state || state->skip_ink == PANGO_SKIP_INK_NONE || width <= 0 || height <= 0)
+    {
+      pango_renderer_draw_rectangle (renderer, part, x, y, width, height);
+      return;
+    }
+
+  gaps = get_ink_gaps (renderer, state, y, height);
+  lo = 0;
+  hi = gaps->len;
+  while (lo < hi)
+    {
+      guint mid = lo + (hi - lo) / 2;
+
+      if (g_array_index (gaps, InkGap, mid).right <= x)
+        lo = mid + 1;
+      else
+        hi = mid;
+    }
+
+  for (guint i = lo; i < gaps->len; i++)
+    {
+      InkGap *gap = &g_array_index (gaps, InkGap, i);
+
+      if (gap->left >= end)
+        break;
+
+      if (gap->left > cursor)
+        pango_renderer_draw_rectangle (renderer, part, cursor, y,
+                                       gap->left - cursor, height);
+
+      cursor = MAX (cursor, gap->right);
+
+      if (cursor >= end)
+        break;
+    }
+
+  if (cursor < end)
+    pango_renderer_draw_rectangle (renderer, part, cursor, y, end - cursor, height);
+}
+
 static void
 draw_underline (PangoRenderer *renderer,
                 LineState     *state)
@@ -228,22 +518,22 @@ draw_underline (PangoRenderer *renderer,
       break;
     case PANGO_UNDERLINE_DOUBLE:
     case PANGO_UNDERLINE_DOUBLE_LINE:
-      pango_renderer_draw_rectangle (renderer,
-                                     PANGO_RENDER_PART_UNDERLINE,
-                                     rect->x,
-                                     rect->y + 2 * rect->height,
-                                     rect->width,
-                                     rect->height);
+      draw_decoration (renderer,
+                       PANGO_RENDER_PART_UNDERLINE,
+                       rect->x,
+                       rect->y + 2 * rect->height,
+                       rect->width,
+                       rect->height);
       G_GNUC_FALLTHROUGH;
     case PANGO_UNDERLINE_SINGLE:
     case PANGO_UNDERLINE_LOW:
     case PANGO_UNDERLINE_SINGLE_LINE:
-      pango_renderer_draw_rectangle (renderer,
-                                     PANGO_RENDER_PART_UNDERLINE,
-                                     rect->x,
-                                     rect->y,
-                                     rect->width,
-                                     rect->height);
+      draw_decoration (renderer,
+                       PANGO_RENDER_PART_UNDERLINE,
+                       rect->x,
+                       rect->y,
+                       rect->width,
+                       rect->height);
       break;
     case PANGO_UNDERLINE_ERROR:
     case PANGO_UNDERLINE_ERROR_LINE:
@@ -272,12 +562,12 @@ draw_overline (PangoRenderer *renderer,
     case PANGO_OVERLINE_NONE:
       break;
     case PANGO_OVERLINE_SINGLE:
-      pango_renderer_draw_rectangle (renderer,
-                                     PANGO_RENDER_PART_OVERLINE,
-                                     rect->x,
-                                     rect->y,
-                                     rect->width,
-                                     rect->height);
+      draw_decoration (renderer,
+                       PANGO_RENDER_PART_OVERLINE,
+                       rect->x,
+                       rect->y,
+                       rect->width,
+                       rect->height);
       break;
     default:
       break;
@@ -601,6 +891,10 @@ pango_renderer_draw_layout_line (PangoRenderer   *renderer,
   renderer->priv->line = line;
   renderer->priv->line_state = &state;
 
+  state.skip_ink = line->layout ? pango_context_get_skip_ink (pango_layout_get_context (line->layout))
+                                : PANGO_SKIP_INK_NONE;
+  state.x = x;
+  state.y = y;
   state.underline = PANGO_UNDERLINE_NONE;
   state.overline = PANGO_OVERLINE_NONE;
   state.strikethrough = FALSE;
@@ -654,19 +948,7 @@ pango_renderer_draw_layout_line (PangoRenderer   *renderer,
       state.logical_rect_end = x + x_off + glyph_string_width;
 
       x_off += run->start_x_offset;
-      y_off = run->y_offset;
-
-      if (run->item->analysis.flags & PANGO_ANALYSIS_FLAG_CENTERED_BASELINE)
-        {
-          gboolean is_hinted = ((logical_rect.y | logical_rect.height) & (PANGO_SCALE - 1)) == 0;
-          int adjustment = logical_rect.y + logical_rect.height / 2;
-
-          if (is_hinted)
-            adjustment = PANGO_UNITS_ROUND (adjustment);
-
-          y_off += adjustment;
-        }
-
+      y_off = get_run_y_offset (run, logical);
 
       if (renderer->priv->color_set[PANGO_RENDER_PART_BACKGROUND])
         {
@@ -742,6 +1024,8 @@ pango_renderer_draw_layout_line (PangoRenderer   *renderer,
   draw_overline (renderer, &state);
   draw_strikethrough (renderer, &state);
 
+  g_clear_pointer (&state.ink_glyphs, g_array_unref);
+  g_clear_pointer (&state.ink_strips, g_array_unref);
   renderer->priv->line_state = NULL;
   renderer->priv->line = NULL;
 

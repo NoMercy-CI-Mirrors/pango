@@ -18,6 +18,7 @@ pango_sources = [
   'pango-glyph-item.c',
   'pango-gravity.c',
   'pango-item.c',
+  'pango-ink.c',
   'pango-language.c',
   'pango-layout.c',
   'pango-markup.c',

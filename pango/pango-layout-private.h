@@ -48,6 +48,7 @@ struct _PangoLayout
 
   guint serial;
   guint context_serial;
+  guint context_layout_serial;
 
   int length;			/* length of text in bytes */
   int n_chars;		        /* number of characters in layout */

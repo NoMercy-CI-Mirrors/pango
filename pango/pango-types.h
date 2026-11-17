@@ -29,6 +29,22 @@
 
 G_BEGIN_DECLS
 
+/**
+ * PangoSkipInk:
+ * @PANGO_SKIP_INK_NONE: Draw continuous decorations
+ * @PANGO_SKIP_INK_AUTO: Skip glyph ink where appropriate for the script
+ * @PANGO_SKIP_INK_ALL: Skip glyph ink regardless of the script
+ *
+ * Controls whether underlines and overlines avoid glyph ink.
+ *
+ * Since: 1.60
+ */
+typedef enum {
+  PANGO_SKIP_INK_NONE PANGO_AVAILABLE_ENUMERATOR_IN_1_60,
+  PANGO_SKIP_INK_AUTO PANGO_AVAILABLE_ENUMERATOR_IN_1_60,
+  PANGO_SKIP_INK_ALL PANGO_AVAILABLE_ENUMERATOR_IN_1_60
+} PangoSkipInk;
+
 typedef struct _PangoLogAttr PangoLogAttr;
 
 #ifndef __GI_SCANNER__

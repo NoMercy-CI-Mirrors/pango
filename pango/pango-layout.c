@@ -87,6 +87,7 @@
 #include <hb-ot.h>
 
 #include "pango-layout-private.h"
+#include "pango-context-private.h"
 #include "pango-attributes-private.h"
 #include "pango-font-private.h"
 
@@ -293,6 +294,7 @@ pango_layout_new (PangoContext *context)
 
   layout->context = context;
   layout->context_serial = pango_context_get_serial (context);
+  layout->context_layout_serial = context->layout_serial;
   g_object_ref (context);
 
   return layout;
@@ -1475,7 +1477,19 @@ check_context_changed (PangoLayout *layout)
   layout->context_serial = pango_context_get_serial (layout->context);
 
   if (old_serial != layout->context_serial)
-    pango_layout_context_changed (layout);
+    {
+      if (layout->context_layout_serial != layout->context->layout_serial)
+        {
+          layout->context_layout_serial = layout->context->layout_serial;
+          pango_layout_context_changed (layout);
+        }
+      else
+        {
+          layout->serial++;
+          if (layout->serial == 0)
+            layout->serial++;
+        }
+    }
 }
 
 static void

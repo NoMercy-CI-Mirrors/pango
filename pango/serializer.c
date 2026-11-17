@@ -87,6 +87,13 @@ static const char *overline_names[] = {
   NULL
 };
 
+static const char *skip_ink_names[] = {
+  "none",
+  "auto",
+  "all",
+  NULL
+};
+
 static const char *gravity_names[] = {
   "south",
   "east",
@@ -514,6 +521,7 @@ add_context (GtkJsonPrinter *printer,
   gtk_json_printer_add_string (printer, "gravity-hint", gravity_hint_names[context->gravity_hint]);
   gtk_json_printer_add_string (printer, "base-dir", direction_names[context->base_dir]);
   gtk_json_printer_add_boolean (printer, "round-glyph-positions", context->round_glyph_positions);
+  gtk_json_printer_add_string (printer, "skip-ink", skip_ink_names[context->skip_ink]);
 
   matrix = pango_context_get_matrix (context);
   if (!matrix)
@@ -1335,6 +1343,7 @@ enum {
   CONTEXT_BASE_DIR,
   CONTEXT_ROUND_GLYPH_POSITIONS,
   CONTEXT_TRANSFORM,
+  CONTEXT_SKIP_INK,
 };
 
 static const char *context_members[] = {
@@ -1345,6 +1354,7 @@ static const char *context_members[] = {
   "base-dir",
   "round-glyph-positions",
   "transform",
+  "skip-ink",
   NULL,
 };
 
@@ -1389,6 +1399,10 @@ json_parser_fill_context (GtkJsonParser *parser,
 
         case CONTEXT_ROUND_GLYPH_POSITIONS:
           pango_context_set_round_glyph_positions (context, gtk_json_parser_get_boolean (parser));
+          break;
+
+        case CONTEXT_SKIP_INK:
+          pango_context_set_skip_ink (context, (PangoSkipInk) parser_select_string (parser, skip_ink_names));
           break;
 
         case CONTEXT_TRANSFORM:

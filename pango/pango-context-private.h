@@ -30,6 +30,7 @@ struct _PangoContext
 {
   GObject parent_instance;
   guint serial;
+  guint layout_serial;
   guint fontmap_serial;
 
   PangoLanguage *set_language;
@@ -48,6 +49,7 @@ struct _PangoContext
   PangoFontMetrics *metrics;
 
   gboolean round_glyph_positions;
+  PangoSkipInk skip_ink;
 };
 
 G_END_DECLS

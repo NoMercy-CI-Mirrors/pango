@@ -129,6 +129,79 @@ test_set_round_glyph_positions (void)
   g_object_unref (context);
 }
 
+static void
+test_set_skip_ink (void)
+{
+  PangoContext *context = pango_context_new ();
+  guint serial = pango_context_get_serial (context);
+
+  g_assert_cmpint (pango_context_get_skip_ink (context), ==, PANGO_SKIP_INK_NONE);
+  pango_context_set_skip_ink (context, PANGO_SKIP_INK_NONE);
+  g_assert_cmpuint (pango_context_get_serial (context), ==, serial);
+
+  for (PangoSkipInk mode = PANGO_SKIP_INK_AUTO; mode <= PANGO_SKIP_INK_ALL; mode++)
+    {
+      pango_context_set_skip_ink (context, mode);
+      g_assert_cmpint (pango_context_get_skip_ink (context), ==, mode);
+      g_assert_cmpuint (pango_context_get_serial (context), !=, serial);
+      serial = pango_context_get_serial (context);
+      pango_context_set_skip_ink (context, mode);
+      g_assert_cmpuint (pango_context_get_serial (context), ==, serial);
+    }
+
+  g_test_expect_message ("Pango", G_LOG_LEVEL_CRITICAL, "*skip_ink*failed*");
+  pango_context_set_skip_ink (context, (PangoSkipInk) -1);
+  g_test_assert_expected_messages ();
+  g_assert_cmpint (pango_context_get_skip_ink (context), ==, PANGO_SKIP_INK_ALL);
+  g_assert_cmpuint (pango_context_get_serial (context), ==, serial);
+  g_object_unref (context);
+}
+
+static void
+test_skip_ink_layout (void)
+{
+  PangoContext *context = pango_font_map_create_context (pango_cairo_font_map_get_default ());
+  PangoLayout *layout = pango_layout_new (context);
+  PangoFontDescription *desc = pango_font_description_from_string ("Sans 24");
+  PangoLayoutLine *line;
+  guint serial;
+  int width, height;
+
+  pango_layout_set_text (layout, "AgypA", -1);
+  pango_layout_get_size (layout, &width, &height);
+  line = pango_layout_line_ref (pango_layout_get_line_readonly (layout, 0));
+  serial = pango_layout_get_serial (layout);
+
+  for (PangoSkipInk mode = PANGO_SKIP_INK_AUTO; mode <= PANGO_SKIP_INK_ALL; mode++)
+    {
+      int new_width, new_height;
+
+      pango_context_set_skip_ink (context, mode);
+      g_assert_cmpuint (pango_layout_get_serial (layout), !=, serial);
+      serial = pango_layout_get_serial (layout);
+      g_assert_true (pango_layout_get_line_readonly (layout, 0) == line);
+      pango_layout_get_size (layout, &new_width, &new_height);
+      g_assert_cmpint (new_width, ==, width);
+      g_assert_cmpint (new_height, ==, height);
+    }
+
+  pango_context_set_font_description (context, desc);
+  pango_context_set_skip_ink (context, PANGO_SKIP_INK_NONE);
+  g_assert_cmpuint (pango_layout_get_serial (layout), !=, serial);
+  g_assert_true (pango_layout_get_line_readonly (layout, 0) != line);
+  pango_layout_line_unref (line);
+
+  line = pango_layout_line_ref (pango_layout_get_line_readonly (layout, 0));
+  pango_context_set_skip_ink (context, PANGO_SKIP_INK_ALL);
+  pango_context_changed (context);
+  g_assert_true (pango_layout_get_line_readonly (layout, 0) != line);
+  pango_layout_line_unref (line);
+
+  pango_font_description_free (desc);
+  g_object_unref (layout);
+  g_object_unref (context);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -140,6 +213,8 @@ main (int argc, char *argv[])
   g_test_add_func ("/context/set-base-gravity", test_set_base_gravity);
   g_test_add_func ("/context/set-gravity-hint", test_set_gravity_hint);
   g_test_add_func ("/context/set-round-glyph-positions", test_set_round_glyph_positions);
+  g_test_add_func ("/context/set-skip-ink", test_set_skip_ink);
+  g_test_add_func ("/context/skip-ink-layout", test_skip_ink_layout);
 
   return g_test_run ();
 }
